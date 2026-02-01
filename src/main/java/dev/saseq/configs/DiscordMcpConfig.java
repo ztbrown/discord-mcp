@@ -37,7 +37,7 @@ public class DiscordMcpConfig {
 
     @Bean
     public JDA jda(@Value("${DISCORD_TOKEN:}") String token,
-                   DiscordMessageListener messageListener) {
+                   DiscordMessageListener messageListener) throws InterruptedException {
         if (token == null || token.isEmpty()) {
             System.err.println("ERROR: The environment variable DISCORD_TOKEN is not set. Please set it to run the application properly.");
             System.exit(1);
@@ -48,6 +48,7 @@ public class DiscordMcpConfig {
                         GatewayIntent.MESSAGE_CONTENT,
                         GatewayIntent.DIRECT_MESSAGES)
                 .addEventListeners(messageListener)
-                .build();
+                .build()
+                .awaitReady();
     }
 }
