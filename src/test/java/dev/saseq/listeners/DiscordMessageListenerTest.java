@@ -1,21 +1,29 @@
 package dev.saseq.listeners;
 
+import dev.saseq.mcp.SamplingResponse;
+import dev.saseq.services.MessageResponseService;
 import net.dv8tion.jda.api.JDA;
+import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.Mentions;
 import net.dv8tion.jda.api.entities.SelfUser;
 import net.dv8tion.jda.api.entities.User;
 import net.dv8tion.jda.api.entities.channel.ChannelType;
+import net.dv8tion.jda.api.entities.channel.unions.MessageChannelUnion;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -44,13 +52,22 @@ class DiscordMessageListenerTest {
     @Mock
     private JDA jda;
 
+    @Mock
+    private MessageResponseService messageResponseService;
+
+    @Mock
+    private MessageChannelUnion channel;
+
+    @Mock
+    private Guild guild;
+
     private DiscordMessageListener listener;
     private boolean messageProcessed;
 
     @BeforeEach
     void setUp() {
         messageProcessed = false;
-        listener = new DiscordMessageListener(true) {
+        listener = new DiscordMessageListener(true, messageResponseService) {
             @Override
             protected void processMessage(MessageReceivedEvent event) {
                 messageProcessed = true;
@@ -116,7 +133,7 @@ class DiscordMessageListenerTest {
     @Test
     void configDisablesMentionFilter() {
         // Given: mention filter is disabled via config
-        listener = new DiscordMessageListener(false) {
+        listener = new DiscordMessageListener(false, messageResponseService) {
             @Override
             protected void processMessage(MessageReceivedEvent event) {
                 messageProcessed = true;
@@ -145,5 +162,105 @@ class DiscordMessageListenerTest {
 
         // Then: the message should NOT be processed
         assertFalse(messageProcessed, "Bot messages should be ignored");
+    }
+
+    @Test
+    void listenerInvokesMessageResponseServiceWithCorrectContext() {
+        // Given: a real listener (not overridden) that calls the service
+        DiscordMessageListener realListener = new DiscordMessageListener(true, messageResponseService);
+
+        setupCommonMocks();
+        when(event.getChannelType()).thenReturn(ChannelType.TEXT);
+        when(mentionedBot.getId()).thenReturn(BOT_USER_ID);
+        when(message.getMentions()).thenReturn(mentions);
+        when(mentions.getUsers()).thenReturn(List.of(mentionedBot));
+        when(message.getContentDisplay()).thenReturn("Hello bot!");
+        when(author.getName()).thenReturn("TestUser");
+        when(event.getChannel()).thenReturn(channel);
+        when(channel.getName()).thenReturn("general");
+        when(event.isFromGuild()).thenReturn(true);
+        when(event.getGuild()).thenReturn(guild);
+        when(guild.getName()).thenReturn("Test Server");
+
+        // Mock the service to return a future
+        SamplingResponse mockResponse = new SamplingResponse();
+        SamplingResponse.SamplingContent content = new SamplingResponse.SamplingContent("text", "Hi!");
+        mockResponse.setContent(content);
+        when(messageResponseService.processMessage(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(mockResponse));
+
+        // When: the listener receives the message
+        realListener.onMessageReceived(event);
+
+        // Then: the service should be invoked with correct parameters
+        verify(messageResponseService).processMessage(
+                eq("Hello bot!"),
+                eq("general"),
+                eq("Test Server"),
+                eq("TestUser")
+        );
+    }
+
+    @Test
+    void listenerHandlesDmContext() {
+        // Given: a DM message
+        DiscordMessageListener realListener = new DiscordMessageListener(true, messageResponseService);
+
+        setupCommonMocks();
+        when(event.getChannelType()).thenReturn(ChannelType.PRIVATE);
+        when(message.getMentions()).thenReturn(mentions);
+        when(mentions.getUsers()).thenReturn(List.of());
+        when(message.getContentDisplay()).thenReturn("Hello in DM");
+        when(author.getName()).thenReturn("DMUser");
+        when(event.getChannel()).thenReturn(channel);
+        when(channel.getName()).thenReturn("DMChannel");
+        when(event.isFromGuild()).thenReturn(false);
+
+        // Mock the service to return a future
+        SamplingResponse mockResponse = new SamplingResponse();
+        SamplingResponse.SamplingContent content = new SamplingResponse.SamplingContent("text", "Hi!");
+        mockResponse.setContent(content);
+        when(messageResponseService.processMessage(anyString(), anyString(), any(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(mockResponse));
+
+        // When: the listener receives the DM
+        realListener.onMessageReceived(event);
+
+        // Then: the service should be invoked with null server name
+        verify(messageResponseService).processMessage(
+                eq("Hello in DM"),
+                eq("DMChannel"),
+                isNull(),
+                eq("DMUser")
+        );
+    }
+
+    @Test
+    void listenerHandlesServiceException() {
+        // Given: a real listener with a failing service
+        DiscordMessageListener realListener = new DiscordMessageListener(true, messageResponseService);
+
+        setupCommonMocks();
+        when(event.getChannelType()).thenReturn(ChannelType.TEXT);
+        when(mentionedBot.getId()).thenReturn(BOT_USER_ID);
+        when(message.getMentions()).thenReturn(mentions);
+        when(mentions.getUsers()).thenReturn(List.of(mentionedBot));
+        when(message.getContentDisplay()).thenReturn("Hello bot!");
+        when(author.getName()).thenReturn("TestUser");
+        when(event.getChannel()).thenReturn(channel);
+        when(channel.getName()).thenReturn("general");
+        when(event.isFromGuild()).thenReturn(true);
+        when(event.getGuild()).thenReturn(guild);
+        when(guild.getName()).thenReturn("Test Server");
+
+        // Mock the service to return a failed future
+        CompletableFuture<SamplingResponse> failedFuture = new CompletableFuture<>();
+        failedFuture.completeExceptionally(new RuntimeException("Service failed"));
+        when(messageResponseService.processMessage(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(failedFuture);
+
+        // When: the listener receives the message
+        // Then: should not throw (error is handled gracefully)
+        assertDoesNotThrow(() -> realListener.onMessageReceived(event));
     }
 }
