@@ -4,13 +4,19 @@ import dev.saseq.mcp.McpSamplingClient;
 import dev.saseq.mcp.McpSamplingException;
 import dev.saseq.mcp.SamplingRequest;
 import dev.saseq.mcp.SamplingResponse;
+import net.dv8tion.jda.api.entities.Message;
+import net.dv8tion.jda.api.entities.channel.unions.MessageChannelUnion;
+import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
+import net.dv8tion.jda.api.requests.restaction.MessageCreateAction;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -18,6 +24,7 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -145,5 +152,153 @@ class MessageResponseServiceTest {
         response.setModel("test-model");
         response.setStopReason("end_turn");
         return response;
+    }
+
+    @Nested
+    class PostResponseTests {
+
+        @Mock
+        private MessageReceivedEvent event;
+
+        @Mock
+        private MessageChannelUnion channel;
+
+        @Mock
+        private Message originalMessage;
+
+        @Mock
+        private MessageCreateAction messageAction;
+
+        @Mock
+        private Message sentMessage;
+
+        private void setupPostMocks() {
+            when(event.getChannel()).thenReturn(channel);
+            when(event.getMessage()).thenReturn(originalMessage);
+            when(channel.sendMessage(anyString())).thenReturn(messageAction);
+            when(messageAction.setMessageReference(any(Message.class))).thenReturn(messageAction);
+            when(messageAction.complete()).thenReturn(sentMessage);
+        }
+
+        @Test
+        void postsResponseToCorrectChannel() {
+            // Given: a sampling response
+            setupPostMocks();
+            SamplingResponse response = createMockResponse("Hello, this is Claude!");
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: the response is sent to the event's channel
+            verify(channel).sendMessage("Hello, this is Claude!");
+        }
+
+        @Test
+        void repliesToOriginalMessage() {
+            // Given: a sampling response
+            setupPostMocks();
+            SamplingResponse response = createMockResponse("This is a reply.");
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: the message references the original
+            verify(messageAction).setMessageReference(originalMessage);
+        }
+
+        @Test
+        void splitsLongMessagesAt2000Chars() {
+            // Given: a response longer than 2000 characters
+            setupPostMocks();
+            String longContent = "A".repeat(2500);
+            SamplingResponse response = createMockResponse(longContent);
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: the message is split into multiple parts
+            ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+            verify(channel, times(2)).sendMessage(messageCaptor.capture());
+
+            List<String> messages = messageCaptor.getAllValues();
+            assertEquals(2, messages.size());
+            assertTrue(messages.get(0).length() <= 2000);
+            assertTrue(messages.get(1).length() <= 2000);
+        }
+
+        @Test
+        void splitsAtWordBoundaryWhenPossible() {
+            // Given: a response with words that needs splitting
+            setupPostMocks();
+            String content = "word ".repeat(450); // ~2250 chars
+            SamplingResponse response = createMockResponse(content.trim());
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: split happens at word boundary
+            ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+            verify(channel, atLeast(2)).sendMessage(messageCaptor.capture());
+
+            // First message shouldn't end mid-word
+            String firstMessage = messageCaptor.getAllValues().get(0);
+            assertTrue(firstMessage.endsWith("word") || firstMessage.endsWith(" "),
+                    "Message should split at word boundary");
+        }
+
+        @Test
+        void preservesMarkdownFormatting() {
+            // Given: a response with markdown
+            setupPostMocks();
+            String markdownContent = "**Bold** and *italic* and `code`";
+            SamplingResponse response = createMockResponse(markdownContent);
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: markdown is preserved
+            verify(channel).sendMessage(markdownContent);
+        }
+
+        @Test
+        void handlesEmptyResponse() {
+            // Given: an empty response
+            setupPostMocks();
+            SamplingResponse response = createMockResponse("");
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: a fallback message is sent
+            verify(channel).sendMessage("(No response generated)");
+        }
+
+        @Test
+        void handlesNullContent() {
+            // Given: a response with null content
+            setupPostMocks();
+            SamplingResponse response = new SamplingResponse();
+            response.setContent(null);
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: a fallback message is sent
+            verify(channel).sendMessage("(No response generated)");
+        }
+
+        @Test
+        void onlyFirstMessageRepliesForMultiPartResponse() {
+            // Given: a response that will be split
+            setupPostMocks();
+            String longContent = "A".repeat(4500); // Will be split into 3 messages
+            SamplingResponse response = createMockResponse(longContent);
+
+            // When: the service posts the response
+            service.postResponse(event, response);
+
+            // Then: only the first message uses setMessageReference
+            verify(messageAction, times(1)).setMessageReference(originalMessage);
+        }
     }
 }
